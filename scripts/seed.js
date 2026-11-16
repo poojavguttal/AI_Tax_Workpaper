@@ -37,16 +37,19 @@ const { createClient } = await import('@supabase/supabase-js');
 const db = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
 
 const { data: existing } = await db.from('packet_raw').select('sha256').eq('id', packetId(packet)).maybeSingle();
-if (existing) {
-  if (existing.sha256 !== sha256) {
-    console.error('A different packet with this id is already loaded; packet tables are immutable.');
-    process.exit(1);
-  }
-  console.log('Already loaded; nothing to do.');
-  process.exit(0);
+if (existing && existing.sha256 !== sha256) {
+  console.error('A different packet with this id is already loaded; packet tables are immutable.');
+  process.exit(1);
 }
 
+// Resumable: tables already complete are skipped, empty ones are filled. A
+// partly filled table cannot be repaired here, since packet rows are immutable.
 for (const t of TABLES) {
+  const idCol = t === 'packet_raw' ? 'id' : 'packet_id';
+  const { count, error: countError } = await db.from(t).select('*', { count: 'exact', head: true }).eq(idCol, packetId(packet));
+  if (countError) { console.error(`Count of ${t} failed:`, countError.message); process.exit(1); }
+  if (count === rows[t].length) { console.log(`  ${t} already loaded`); continue; }
+  if (count) { console.error(`${t} is partly loaded (${count} of ${rows[t].length}); packet rows are immutable.`); process.exit(1); }
   for (let i = 0; i < rows[t].length; i += 500) {
     const { error } = await db.from(t).insert(rows[t].slice(i, i + 500));
     if (error) {

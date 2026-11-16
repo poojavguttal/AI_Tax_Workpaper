@@ -42,7 +42,7 @@ export function toFactRows(packet, matched) {
       packet_id, seq, into_fact: m.into, from_fact: m.from, role: m.role, rule: m.rule, why: m.why,
     })),
     document_relations: matched.relations.map(({ kind, doc, of, rule, ...detail }, seq) => ({
-      packet_id, seq, kind, doc_id: doc, of_doc_id: of, detail: Object.keys(detail).length ? detail : null, rule,
+      packet_id, seq, kind, doc_id: doc, of_doc_id: of ?? doc, detail: Object.keys(detail).length ? detail : null, rule,
     })),
     document_dispositions: matched.dispositions.map((d) => ({ packet_id, ...d })),
   };

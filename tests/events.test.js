@@ -96,12 +96,31 @@ describe('effective return', () => {
     expect(s.return.effective.california.balance_due).toBe(-11692);
   });
 
-  it('a decision applies the engine\'s what-if lines and payment changes', () => {
-    const s = reduce(base, prepareAll());
+  it('a decision on its own reproduces the engine\'s what-if exactly; payment changes land on the payment line', () => {
+    const r = checks.results.find((x) => x.id === 'repair_or_improvement:SchE.14A:D47');
+    const s = reduce(base, append([], closeWith(r, { actor: PREPARER, at: at('06-24'), alternative: recommendedAlternative(r), rationale: 'x', authority: 'y' })));
     const line = (k) => s.return.lines.find((l) => l.key === k);
-    expect(line('F1040.26')).toMatchObject({ engine: 13000, effective: 12000 });
     const hvacLines = base.packet.raw.what_if.alternatives.find((w) => w.id === 'hvac_improvement').changed_lines;
-    for (const c of hvacLines) expect(line(c.key).effective).toBe(c.new);
+    for (const c of hvacLines) expect([c.key, line(c.key)?.effective]).toEqual([c.key, c.new]);
+    expect(reduce(base, prepareAll()).return.lines.find((l) => l.key === 'F1040.26')).toMatchObject({ engine: 13000, effective: 12000 });
+  });
+
+  it('with every change applied, the lines add up and roll to the headline totals', () => {
+    for (const log of [prepareAll(), append([], ...checks.results.filter((r) => r.kind === 'error').map((r) => closeWith(r, { actor: PREPARER, at: at('06-24') })))]) {
+      const s = reduce(base, log);
+      const eff = new Map(s.return.lines.map((l) => [l.key, l.effective]));
+      const own = new Map(s.return.lines.map((l) => [l.key, l.own]));
+      const v = (k) => eff.get(k) ?? base.lines.get(k).value;
+      const { federal: f, california: c } = s.return.effective;
+      expect([v('F1040.24'), v('F1040.33'), v('F1040.37')]).toEqual([f.total_tax, f.payments, f.balance_due]);
+      expect([v('F540NR.64'), v('F540NR.78'), v('F540NR.97')]).toEqual([c.total_tax, c.payments, -c.balance_due]);
+      // every line that is a sum of its inputs still is one, plus any change recorded on the line itself
+      for (const [k, signs] of base.graph.signs) {
+        if (!signs) continue;
+        const sum = base.lines.get(k).inputs.reduce((t, i, n) => t + signs[n] * v(i), 0) + (own.get(k) ?? 0);
+        expect([k, Math.abs(sum - v(k)) <= 1.5 ? 0 : sum - v(k)]).toEqual([k, 0]);
+      }
+    }
   });
 
   it('a free-form adjustment needs a reason and an effect, and becomes an item to sign off', () => {
@@ -252,5 +271,101 @@ describe('history', () => {
     expect(JSON.stringify(log)).toBe(frozen);
     expect(JSON.stringify(a.return)).toBe(JSON.stringify(b.return));
     expect(a.blockers).toEqual(b.blockers);
+  });
+});
+
+describe('filing and after', () => {
+  const fileIt = (log) => append(log, { kind: 'file', actor: REVIEWER, at: at('07-13'), target: 'return' });
+  const ack = (j, status, extra = {}) => ({ kind: 'efile_ack', actor: REVIEWER, at: at('07-14'), target: 'return', payload: { jurisdiction: j, status, ...extra } });
+
+  it('an extension is recorded once per jurisdiction, before filing', () => {
+    const ext = { kind: 'extend', actor: REVIEWER, at: at('04-14'), target: 'return', payload: { jurisdiction: 'federal', payment: 36000 } };
+    const s = reduce(base, append([], ext, ext, { ...ext, actor: PREPARER, payload: { jurisdiction: 'california', payment: 0 } }));
+    expect(s.extensions).toHaveLength(1);
+    expect(s.log.map((l) => l.reason ?? 'ok')).toEqual(['ok', 'a federal extension is already on file', 'preparer cannot file an extension']);
+  });
+
+  it('a rejected e-file unfreezes the return; it is sent again and accepted', () => {
+    let log = append(fileIt(fullSeason()), ack('federal', 'rejected', { code: 'R0000-504-02' }));
+    let s = reduce(base, log);
+    expect(s.filed).toBeNull();
+    expect(s.filings[0].rejected.payload.code).toBe('R0000-504-02');
+    expect(s.canFile).toBe(true); // nothing in the return changed, so sign-offs and approval still hold
+    log = append(fileIt(log), ack('federal', 'accepted'), ack('california', 'accepted'));
+    s = reduce(base, log);
+    expect(s.filings).toHaveLength(2);
+    expect(s.filed.acks.map((a) => a.payload.status)).toEqual(['accepted', 'accepted']);
+  });
+
+  it('an amendment reopens the return on top of the filed one, needs fresh sign-off, and files as amended', () => {
+    let log = append(fileIt(fullSeason()), ack('federal', 'accepted'));
+    log = append(log, { kind: 'correct', actor: PREPARER, at: at('08-01'), target: 'lot_basis:F8949.B.N1' });
+    expect(reduce(base, log).log.at(-1).reason).toBe('the return is filed and frozen; changes go on an amendment');
+    log = append(log, { kind: 'amend', actor: PARTNER, at: at('08-02'), target: 'return', payload: { reason: 'Exam adjustment' } },
+      { kind: 'adjust', actor: PREPARER, at: at('08-03'), target: 'line:SchC.1', payload: { value: 161000, reason: 'Refund to client not income', effect: { federal: -958, california: -84 } } });
+    let s = reduce(base, log);
+    expect(s.amendment).toMatchObject({ kind: 'amend' });
+    expect(s.filed.return.effective.federal.total_tax - s.return.effective.federal.total_tax).toBe(958);
+    expect(s.blockers.map((b) => b.id)).toEqual(expect.arrayContaining(['Reviewer sign-off', 'Partner sign-off']));
+    const adj = s.items.find((i) => i.kind === 'adjustment');
+    log = append(log, { kind: 'signoff', actor: REVIEWER, at: at('08-04'), target: adj.id, payload: { level: 'reviewer' } },
+      { kind: 'signoff', actor: REVIEWER, at: at('08-04'), target: 'return', payload: { level: 'reviewer' } },
+      { kind: 'signoff', actor: PARTNER, at: at('08-04'), target: 'return', payload: { level: 'partner' } },
+      { kind: 'client_approval', actor: CLIENT, at: at('08-05'), target: 'return' },
+      { kind: 'file', actor: PARTNER, at: at('08-06'), target: 'return' });
+    s = reduce(base, log);
+    expect(s.filings.map((f) => f.type)).toEqual(['original', 'amended']);
+    expect(s.amendment).toBeNull();
+  });
+
+  it('a notice response and the roll-forward need a filed return', () => {
+    const resp = { kind: 'notice_response', actor: PREPARER, at: at('09-01'), target: 'N-2025-L566', payload: { text: 'Enclosed' } };
+    expect(reduce(base, append([], resp)).log[0].reason).toBe('only a filed return has notices to answer');
+    const s = reduce(base, append(fileIt(fullSeason()), resp, { kind: 'roll_forward', actor: PREPARER, at: at('09-02'), target: 'return' }));
+    expect(s.noticeResponses[0].filedHash).toBe(s.filed.hash);
+    expect(s.rolledForward).not.toBeNull();
+  });
+});
+
+describe('people and firm', () => {
+  it('a question goes to one person; only they (or either client) answer it; a blocking one blocks filing', () => {
+    let log = append(fullSeason(), { kind: 'ask', actor: PREPARER, at: at('07-11'), target: 'SchC.1', payload: { to: CLIENT, text: 'Was the $12,400 also deposited?', blocking: true } });
+    const q = log.at(-1).id;
+    expect(reduce(base, log).blockers).toEqual([{ type: 'question', id: q, text: 'Was the $12,400 also deposited?' }]);
+    log = append(log, { kind: 'answer', actor: REVIEWER, at: at('07-11'), target: q, payload: { text: 'n/a' } },
+      { kind: 'answer', actor: 'cu-02', at: at('07-12'), target: q, payload: { text: 'Yes, same deposits' } });
+    const s = reduce(base, log);
+    expect(s.log.at(-2).reason).toBe('only Ngozi Okafor can answer this');
+    expect(s.questions[0].answer.payload.text).toBe('Yes, same deposits');
+    expect(s.canFile).toBe(true);
+  });
+
+  it('assignments go to active preparers, reviewers or partners, set by a reviewer, partner or admin', () => {
+    const s = reduce(base, append([],
+      { kind: 'assign', actor: 'st-05', at: at('03-25'), target: 'lot_basis:F8949.B.N1', payload: { to: NEW_HIRE, due: '2026-03-27' } },
+      { kind: 'assign', actor: PREPARER, at: at('03-25'), target: 'lot_basis:F8949.B.N3', payload: { to: PREPARER } },
+      { kind: 'assign', actor: REVIEWER, at: at('03-01'), target: 'lot_basis:F8949.B.N3', payload: { to: NEW_HIRE } }));
+    expect(s.log.map((l) => l.reason ?? 'ok')).toEqual(['ok', 'preparer cannot assign work', 'Marcus Bell is not active until 2026-03-24']);
+    expect(s.itemsById.get('lot_basis:F8949.B.N1').assignment.payload.to).toBe(NEW_HIRE);
+  });
+
+  it('time is logged against the budget areas', () => {
+    const s = reduce(base, append([],
+      { kind: 'log_time', actor: PREPARER, at: at('03-10'), target: 'return', payload: { area: 'business', hours: 2.5 } },
+      { kind: 'log_time', actor: PREPARER, at: at('03-10'), target: 'return', payload: { area: 'golf', hours: 1 } }));
+    expect(s.time).toHaveLength(1);
+    expect(s.log[1].reason).toMatch(/^area must be one of/);
+  });
+
+  it('only the administrator changes standards, and a lower partner threshold pulls more items to the partner', () => {
+    const id = 'double_counted:SchA.8a';
+    const before = reduce(base, []).itemsById.get(id).requiredSignoffs;
+    const s = reduce(base, append([],
+      { kind: 'set_standard', actor: PARTNER, at: at('03-01'), target: 'partner_threshold', payload: { value: 100, reason: 'x' } },
+      { kind: 'set_standard', actor: 'st-05', at: at('03-01'), target: 'partner_threshold', payload: { value: 100, reason: 'Tighter review this season' } }));
+    expect(s.log[0].reason).toBe('only the firm administrator changes firm standards');
+    expect(before).toEqual(['reviewer']);
+    expect(s.itemsById.get(id).requiredSignoffs).toEqual(['reviewer', 'partner']);
+    expect(reduce(base, []).itemsById.get(id).requiredSignoffs).toEqual(['reviewer']); // the next reduce starts from the packet's standard again
   });
 });

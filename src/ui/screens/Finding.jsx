@@ -8,6 +8,7 @@ import { sourceName, showValue } from '../components/Trace.jsx';
 import { Header } from '../components/Shell.jsx';
 import { navigate } from '../state/router.js';
 import { TABS } from './Queue.jsx';
+import { Questions, AssignBox } from '../components/People.jsx';
 
 const ROLE = { primary: 'Primary', duplicate: 'Duplicate', included_in: 'Already included', superseded: 'Superseded', supporting: 'Supporting', part: 'Part', component: 'Component' };
 
@@ -145,7 +146,7 @@ function Proposal({ item, alt, setAlt }) {
 
 /** The right column: the human decision, and who has to sign. */
 function Decision({ item, alt }) {
-  const { actor, dispatch } = useWorkpaper();
+  const { actor, dispatch, state } = useWorkpaper();
   const rec = item.recommendation;
   const c = item.closing;
   const [rationale, setRationale] = useState('');
@@ -201,13 +202,14 @@ function Decision({ item, alt }) {
             <div className="grow"><div className="w6">{actor.name}</div><div className="t12 c3">{ROLE_LABEL[actor.role]}{actor.credential ? `, ${actor.credential}` : ''}</div></div>
           </div>
         )}
+        <div className="sect"><AssignBox target={item.id} compact /></div>
         <div className="sect">
           <span className="cap">Required before it closes</span>
           <div className="row wrap" style={{ gap: 8 }}>
             <span className="pill blue">{{ correction: 'Correction', decision: 'Decision', disposition: 'Disposition', explanation: 'Explanation', acknowledgement: 'Acknowledgement' }[item.requires.action] ?? 'Action'}</span>
             {judgment && <span className="pill blue">Cited authority</span>}
             <span className="pill blue">Reviewer sign-off</span>
-            {partner && <span className="pill amber"><Flag size={12} /> Partner sign-off · effect over $1,000</span>}
+            {partner && <span className="pill amber"><Flag size={12} /> Partner sign-off · effect over {money(state.standards.partner_threshold)}</span>}
             {item.blocking && <span className="pill gray">Blocks filing</span>}
           </div>
         </div>
@@ -366,11 +368,12 @@ function FindingPage({ item, state, openTrace }) {
 
               <div className="card" style={{ overflow: 'hidden' }}>
                 <div className="tabs" style={{ padding: '0 12px' }}>
-                  {[['notes', 'Notes', notes.length], ['history', 'History', history.length]].map(([k, l, n]) => (
+                  {[['notes', 'Notes', notes.length], ['questions', 'Questions', state.questions.filter((q) => q.target === item.id).length], ['history', 'History', history.length]].map(([k, l, n]) => (
                     <button type="button" key={k} className={`tab ${tab === k ? 'on' : ''}`} onClick={() => setTab(k)}>{l}<span className="n">{n}</span></button>
                   ))}
                 </div>
                 {tab === 'notes' && <Notes item={item} />}
+                {tab === 'questions' && <Questions target={item.id} />}
                 {tab === 'history' && (history.length === 0 ? <Empty title="No activity yet" /> : (
                   <table className="tbl"><tbody>
                     {history.map((l) => (

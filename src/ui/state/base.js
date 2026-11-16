@@ -73,3 +73,4 @@ export const actorsList = [
 export const actorById = new Map(actorsList.map((a) => [a.id, a]));
 
 export const activities = new Map(matched.activities.map((a) => [a.id, a]));
+

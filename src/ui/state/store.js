@@ -14,7 +14,12 @@ export class LocalStore {
     return log;
   }
   async reset() { try { localStorage.removeItem(KEY); } catch { /* ignore */ } }
-  subscribe() { return () => {}; }
+  /** Other tabs of this browser write the same key; the storage event brings their events in live. */
+  subscribe(onChange) {
+    const on = (e) => { if (e.key === KEY || e.key === null) onChange(); };
+    window.addEventListener('storage', on);
+    return () => window.removeEventListener('storage', on);
+  }
 }
 
 export class SupabaseStore {

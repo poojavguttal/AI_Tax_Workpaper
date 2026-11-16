@@ -24,7 +24,7 @@ const FORM_NAMES = {
 const BOX = { A: 'Box A · Short-term, basis reported', B: 'Box B · Short-term, basis not reported', D: 'Box D · Long-term, basis reported', E: 'Box E · Long-term, basis not reported', F: 'Box F · Long-term, no Form 1099-B', H: 'Box H · Short-term digital assets', K: 'Box K · Long-term digital assets' };
 const SUMMARY = ['F1040.1z', 'F1040.2b', 'F1040.3b', 'F1040.4b', 'F1040.7', 'F1040.8', 'F1040.9', 'F1040.10', 'F1040.11', 'F1040.12', 'F1040.13', 'F1040.15', 'F1040.16', 'F1040.19', 'F1040.23', 'F1040.24', 'F1040.25a', 'F1040.26', 'F1040.33', 'F1040.37'];
 const KEY_FIGS = {
-  federal: [['F1040.9', 'Total income'], ['F1040.11', 'Adjusted gross income'], ['F1040.15', 'Taxable income'], ['F1040.24', 'Total tax'], ['F1040.33', 'Total payments'], ['F1040.37', 'Amount owed']],
+  federal: [['F1040.9', 'Total income'], ['F1040.11', 'Adjusted gross income'], ['F1040.15', 'Taxable income'], ['F1040.24', 'Total tax'], ['F1040.33', 'Total payments'], ['F1040.37', 'Owed or (refund)']],
   california: [['F540NR.17', 'Total AGI, CA law'], ['F540NR.32', 'California AGI'], ['F540NR.35', 'CA taxable income'], ['F540NR.64', 'Total tax'], ['F540NR.78', 'Total payments'], ['F540NR.97', 'Overpaid']],
 };
 

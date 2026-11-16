@@ -6,6 +6,7 @@ import { reduce, append, changesBetween } from '../../domain/events/index.js';
 import { base, packet, actorById } from './base.js';
 import { openStore } from './store.js';
 import { packetId } from '../../db/rows.js';
+import { useRoute } from './router.js';
 
 const Ctx = createContext(null);
 const ACTOR_KEY = 'miraflores.workpaper.actor';
@@ -35,6 +36,7 @@ export function WorkpaperProvider({ children }) {
 
   const state = useMemo(() => reduce(base, events), [events]);
   const actor = actorById.get(actorId);
+  const presence = usePresence(actorId);
 
   const toast = useCallback((t) => {
     const id = Math.random().toString(36).slice(2);
@@ -82,9 +84,37 @@ export function WorkpaperProvider({ children }) {
   const value = {
     ready: Boolean(store), store, events, state, actor, actorId, switchActor, dispatch, toast, toasts,
     trace, openTrace: (t) => setTrace({ ...t, id: Date.now() }), closeTrace: () => setTrace(null), sinceLastSeen, markSeen, resetDemo,
-    canSeeSensitive: Boolean(actor?.sensitive_data_clearance),
+    canSeeSensitive: Boolean(actor?.sensitive_data_clearance), presence,
   };
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 
 export const useWorkpaper = () => useContext(Ctx);
+
+// Presence: who else has the workpaper open, and on which screen. Tabs of this
+// browser talk over a BroadcastChannel (Supabase Realtime presence plays the same
+// role for a shared log). Presence is not part of the record, so it is never an event.
+const TAB = Math.random().toString(36).slice(2);
+function usePresence(actorId) {
+  const { path, params } = useRoute();
+  const where = `${path}${params.id ? `:${params.id}` : params.line ? `:${params.line}` : ''}`;
+  const [peers, setPeers] = useState({});
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return undefined;
+    const ch = new BroadcastChannel('miraflores.presence');
+    const me = () => ({ tab: TAB, actorId, path, where, at: Date.now() });
+    const beat = () => ch.postMessage(me());
+    ch.onmessage = (m) => {
+      const p = m.data;
+      if (p.tab === TAB) return;
+      if (p.bye) setPeers((x) => { const n = { ...x }; delete n[p.tab]; return n; });
+      else { setPeers((x) => ({ ...x, [p.tab]: p })); if (p.hello) beat(); }
+    };
+    ch.postMessage({ ...me(), hello: true });
+    const timer = setInterval(() => { beat(); setPeers((x) => Object.fromEntries(Object.entries(x).filter(([, p]) => Date.now() - p.at < 12000))); }, 4000);
+    const bye = () => ch.postMessage({ tab: TAB, bye: true });
+    window.addEventListener('beforeunload', bye);
+    return () => { bye(); clearInterval(timer); window.removeEventListener('beforeunload', bye); ch.close(); };
+  }, [actorId, path, where]);
+  return Object.values(peers);
+}

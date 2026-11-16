@@ -4,7 +4,7 @@
 // reason, so the state never depends on anything but the log.
 
 import { contentHash } from './hash.js';
-import { actorsFrom, CAN } from './people.js';
+import { actorsFrom, CAN, STANDARD_KEYS } from './people.js';
 
 const CLOSES = { correction: 'correct', decision: 'decide', disposition: 'dispose', explanation: 'explain', acknowledgement: 'acknowledge' };
 const CONTENT_KINDS = new Set(['correct', 'decide', 'dismiss', 'dispose', 'explain', 'acknowledge', 'adjust', 'revert']);
@@ -36,8 +36,18 @@ function itemHash(item) {
   });
 }
 
+/** The largest tax effect an item (or any of its alternatives) can have. */
+function largestEffect(r) {
+  const e = r.effect ?? {};
+  return Math.max(Math.abs(e.federal ?? 0), Math.abs(e.california ?? 0), Math.abs(e.federal_payments ?? 0), Math.abs(e.california_payments ?? 0),
+    ...(r.alternatives ?? []).map((a) => Math.max(Math.abs(a.effect?.federal ?? 0), Math.abs(a.effect?.california ?? 0))));
+}
+
+// The partner threshold is a firm standard the administrator can change, so the
+// required sign-off level is derived here rather than fixed when the check ran.
+let threshold = 1000;
 function requiredLevels(item) {
-  return item.result.requires.signoff === 'partner' ? ['reviewer', 'partner'] : ['reviewer'];
+  return largestEffect(item.result) > threshold ? ['reviewer', 'partner'] : ['reviewer'];
 }
 
 function itemStatus(item) {
@@ -63,6 +73,122 @@ function closingEffect(item) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Line arithmetic. The engine can't be rerun, so the effective return is the engine
+// return plus changes. Every recorded change becomes a per-line delta, and deltas flow
+// up through each line that is a signed sum of its inputs (R-SUM, R-CARRY and the
+// like, inferred from the engine's own values). Lines that are not sums (tax tables,
+// limits, ratios) stop the flow; there an item's estimated tax effect is booked on the
+// tax line, so the line totals always roll up to the headline figures.
+
+const TOL = 1.5;
+const round2 = (n) => Math.round(n * 100) / 100;
+const round6 = (n) => Math.round(n * 1e6) / 1e6;
+
+// Only true sums and carries pass changes on. The engine also labels floored and
+// phased-out amounts R-SUM (AMT = max(0, ...), a credit after phase-out), so forms whose
+// arithmetic embeds limits never pass changes on; there the engine's what-if values or
+// the item's tax effect apply instead.
+const SUM_RULES = new Set(['R-SUM', 'R-CARRY', 'R-DEDUCTION-CHOICE']);
+const LIMITED_FORMS = new Set(['F6251', 'F8812', 'F8863', 'F2441', 'F8960', 'F8959', 'F8995', 'F2210', 'SchSE', 'F8582', 'F7203', 'F8606', 'F8889']);
+const LIMITED_LABEL = /minimum tax|phase-?out|limit|allowed|excess/i;
+
+/** Signs that make a line the sum of its inputs, or null when it isn't one. */
+function sumSigns(line, lines) {
+  if (!SUM_RULES.has(line.rule) || LIMITED_FORMS.has(line.form) || LIMITED_LABEL.test(line.label)) return null;
+  const vals = line.inputs.map((k) => lines.get(k)?.value);
+  if (!line.inputs.length || typeof line.value !== 'number' || vals.some((v) => typeof v !== 'number')) return null;
+  const n = vals.length;
+  const fits = (signs) => Math.abs(vals.reduce((t, v, i) => t + signs[i] * v, 0) - line.value) <= TOL;
+  const plus = vals.map(() => 1);
+  if (fits(plus)) return plus;
+  if (n > 14) return null;
+  // Fewest minus signs first, so an input whose engine value is 0 is taken as added.
+  const masks = [...Array(2 ** n).keys()].sort((a, b) => popcount(a) - popcount(b) || a - b);
+  for (const m of masks) {
+    const signs = vals.map((_, i) => ((m >> i) & 1 ? -1 : 1));
+    if (fits(signs)) return signs;
+  }
+  return null;
+}
+const popcount = (m) => { let c = 0; for (let x = m; x; x >>= 1) c += x & 1; return c; };
+
+export function lineGraph(lines) {
+  const signs = new Map();
+  for (const l of lines.values()) signs.set(l.key, sumSigns(l, lines));
+  const order = [];
+  const seen = new Set();
+  const visit = (k) => {
+    if (seen.has(k) || !lines.has(k)) return;
+    seen.add(k);
+    for (const i of lines.get(k).inputs) visit(i);
+    order.push(k);
+  };
+  for (const k of lines.keys()) visit(k);
+  return { signs, order };
+}
+
+/**
+ * Deltas for every line. `set` deltas replace what the inputs would give (the engine's
+ * what-if, consistent in itself); `add` deltas are changes recorded on the line itself
+ * and come on top of whatever flows in from its inputs.
+ */
+function propagate(base, set, add) {
+  const { signs, order } = base.graph;
+  const d = new Map();
+  for (const k of order) {
+    let v = 0;
+    if (set.has(k)) v = set.get(k);
+    else {
+      const sg = signs.get(k);
+      if (sg) base.lines.get(k).inputs.forEach((i, n) => { v += sg[n] * (d.get(i) ?? 0); });
+      v += add.get(k) ?? 0;
+    }
+    if (Math.abs(v) >= 1e-9) d.set(k, round6(v));
+  }
+  return d;
+}
+
+// Where each part of an item's effect must show, and the line it is booked on when the
+// line arithmetic alone doesn't carry it there.
+const HEADLINES = [
+  ['F1040.24', 'federal', 'F1040.16'], ['F540NR.64', 'california', 'F540NR.37'],
+  ['F1040.33', 'federal_payments', 'F1040.26'], ['F540NR.78', 'california_payments', 'F540NR.72'],
+];
+
+/** The per-line deltas one closing event contributes, and the part recorded on each line itself. */
+function closingDeltas(base, item) {
+  const c = item.closing;
+  const r = item.result;
+  const set = new Map();
+  const add = new Map();
+  const engine = (k) => base.lines.get(k)?.value ?? 0;
+  const put = (m, k, v) => { if (base.lines.has(k)) m.set(k, (m.get(k) ?? 0) + v); };
+  const key0 = r.lines[0]?.split('|')[1];
+  // A correction moves the line by the difference the check found (its engine figure vs
+  // the expected one), which is the whole line only when the check is about the line.
+  if (c.kind === 'correct' && typeof r.expected === 'number' && key0) put(add, key0, r.expected - (typeof r.engine === 'number' ? r.engine : engine(key0)));
+  if (c.kind === 'adjust') { const k = c.target.slice('line:'.length); put(add, k, c.payload.value - engine(k)); }
+  if (c.kind === 'decide') {
+    const alt = r.alternatives[c.payload.alternative];
+    const whatIf = alt?.what_if && base.packet.raw.what_if.alternatives.find((w) => w.id === alt.what_if);
+    // The engine's what-if is taken line for line (it knows floors and limits that look
+    // like sums); as deltas, it adds to every other item's changes on the same lines.
+    for (const ch of whatIf?.changed_lines ?? []) if (typeof ch.new === 'number') put(set, ch.key, ch.new - engine(ch.key));
+    const pay = alt?.effect?.federal_payments ?? alt?.effect?.california_payments;
+    if (pay && key0) put(add, key0, pay);
+  }
+  let d = propagate(base, set, add);
+  const effect = closingEffect(item) ?? {};
+  let again = false;
+  for (const [head, part, root] of HEADLINES) {
+    const resid = round2((effect[part] ?? 0) - (d.get(head) ?? 0));
+    if (Math.abs(resid) >= 0.005) { put(add, root, resid); again = true; }
+  }
+  if (again) d = propagate(base, set, add);
+  return { d, own: add };
+}
+
 function computeReturn(state) {
   const { base } = state;
   const items = [...state.items.values()];
@@ -73,35 +199,30 @@ function computeReturn(state) {
   federal.balance_due = federal.total_tax - federal.payments;
   california.balance_due = california.total_tax - california.payments;
 
-  // Line values: engine value, replaced where a correction or decision states the corrected value.
-  const lines = new Map();
-  const set = (key, value, eventId) => {
-    const engine = base.lines.get(key)?.value;
-    lines.set(key, { key, engine, effective: value, events: [...(lines.get(key)?.events ?? []), eventId] });
-  };
+  // Line values: engine value plus the deltas of every closing event, summed.
+  const total = new Map();
+  const own = new Map();
+  const by = new Map();
   for (const item of items) {
-    const c = item.closing;
-    if (!c) continue;
-    const r = item.result;
-    if (c.kind === 'correct' && typeof r.expected === 'number' && r.lines.length) set(r.lines[0].split('|')[1], r.expected, c.id);
-    if (c.kind === 'adjust') set(c.target.slice('line:'.length), c.payload.value, c.id);
-    if (c.kind === 'decide') {
-      const alt = r.alternatives[c.payload.alternative];
-      const whatIf = alt?.what_if && base.packet.raw.what_if.alternatives.find((w) => w.id === alt.what_if);
-      for (const ch of whatIf?.changed_lines ?? []) set(ch.key, ch.new, c.id);
-      const pay = alt?.effect?.federal_payments ?? alt?.effect?.california_payments;
-      if (pay && r.lines.length) {
-        const key = r.lines[0].split('|')[1];
-        set(key, (lines.get(key)?.effective ?? base.lines.get(key).value) + pay, c.id);
-      }
+    if (!item.closing) continue;
+    const res = closingDeltas(base, item);
+    for (const [k, v] of res.d) {
+      total.set(k, (total.get(k) ?? 0) + v);
+      by.set(k, [...(by.get(k) ?? []), item.closing.id]);
     }
+    for (const [k, v] of res.own) own.set(k, (own.get(k) ?? 0) + v);
   }
+  const lines = [...total].filter(([, v]) => Math.abs(v) >= 1e-6).map(([key, v]) => {
+    const engine = base.lines.get(key).value;
+    const ratio = Math.abs(engine) < 1 && !Number.isInteger(engine);
+    return { key, engine, effective: ratio ? Math.round((engine + v) * 1e4) / 1e4 : round2(engine + v), own: round2(own.get(key) ?? 0), events: by.get(key) };
+  });
   return {
     engine: { federal: s.federal, california: s.california },
     effective: { federal, california },
     delta,
-    lines: [...lines.values()].sort((a, b) => (a.key < b.key ? -1 : 1)),
-    method: 'Engine totals plus each accepted item\'s estimated effect (tax_effect_rates or what_if); the engine is not rerun.',
+    lines: lines.sort((a, b) => (a.key < b.key ? -1 : 1)),
+    method: 'Engine values plus recorded changes. Changes flow up through every line that is a sum of its inputs; where the engine computed tax (not a sum), each item\'s estimated effect (tax_effect_rates or what_if) is booked on the tax line, so the lines add up to the totals. The engine is not rerun.',
   };
 }
 
@@ -139,8 +260,9 @@ export function blockers(state) {
     if (item.result.blocking && status !== 'closed') out.push({ type: 'item', id: item.result.id, kind: item.result.kind, status });
   }
   for (const n of state.notes.values()) if (n.payload.blocking && !n.resolved) out.push({ type: 'note', id: n.id, text: n.payload.text });
+  for (const q of state.questions.values()) if (q.payload.blocking && !q.answer) out.push({ type: 'question', id: q.id, text: q.payload.text });
   for (const s of steps(state)) if (!s.done) out.push({ type: 'step', id: s.name });
-  if (state.filed) out.push({ type: 'frozen', id: state.filed.id });
+  if (state.filed && !state.amendment) out.push({ type: 'frozen', id: state.filed.id });
   return out;
 }
 
@@ -152,7 +274,7 @@ function validate(state, e) {
   if (!actor) return 'unknown actor';
   if (actor.active_from && e.at.slice(0, 10) < actor.active_from) return `${actor.name} is not active until ${actor.active_from}`;
   const role = actor.role;
-  if (state.filed && CONTENT_KINDS.has(e.kind)) return 'the return is filed and frozen; changes go on an amendment';
+  if (state.filed && !state.amendment && CONTENT_KINDS.has(e.kind)) return 'the return is filed and frozen; changes go on an amendment';
   const item = state.items.get(e.target);
 
   switch (e.kind) {
@@ -226,6 +348,79 @@ function validate(state, e) {
       const b = blockers(state);
       return b.length ? `${b.length} blocker(s) remain, e.g. ${b[0].type} ${b[0].id}` : null;
     }
+    case 'extend':
+      if (!CAN.file.has(role)) return `${role} cannot file an extension`;
+      if (state.filings.length) return 'the return is already filed';
+      if (!['federal', 'california'].includes(e.payload?.jurisdiction)) return 'say which jurisdiction (federal or california)';
+      if (typeof e.payload?.payment !== 'number' || e.payload.payment < 0) return 'record the payment sent with the extension (0 if none)';
+      if (state.extensions.some((x) => x.payload.jurisdiction === e.payload.jurisdiction)) return `a ${e.payload.jurisdiction} extension is already on file`;
+      return null;
+    case 'efile_ack': {
+      if (!CAN.file.has(role)) return `${role} cannot record e-file acknowledgements`;
+      const last = state.filings.at(-1);
+      if (!last || !state.filed) return 'nothing has been transmitted';
+      if (!['federal', 'california'].includes(e.payload?.jurisdiction)) return 'say which jurisdiction (federal or california)';
+      if (!['accepted', 'rejected'].includes(e.payload?.status)) return 'status is accepted or rejected';
+      if (e.payload.status === 'rejected' && !e.payload.code) return 'a rejection records the agency\'s error code';
+      if (last.acks.some((a) => a.payload.jurisdiction === e.payload.jurisdiction)) return `the ${e.payload.jurisdiction} acknowledgement for this submission is already recorded`;
+      return null;
+    }
+    case 'amend':
+      if (!CAN.file.has(role)) return `${role} cannot open an amendment`;
+      if (!state.filed) return 'only a filed return can be amended';
+      if (state.amendment) return 'an amendment is already open';
+      if (!state.filed.acks.some((a) => a.payload.status === 'accepted')) return 'wait until an agency accepts the filed return';
+      if (!e.payload?.reason) return 'an amendment records why';
+      return null;
+    case 'ask': {
+      if (actor.kind === 'staff' && !CAN.note.has(role)) return `${role} cannot ask questions`;
+      const to = state.actors.get(e.payload?.to);
+      if (!to) return 'address the question to a colleague or the client';
+      if (to.id === e.actor) return 'you cannot ask yourself';
+      if (actor.kind === 'client' && to.kind === 'client') return 'clients ask the firm, not each other';
+      if (!e.payload?.text) return 'a question needs text';
+      return null;
+    }
+    case 'answer': {
+      const q = state.questions.get(e.target);
+      if (!q) return `no question ${e.target}`;
+      if (q.answer) return 'already answered';
+      const to = state.actors.get(q.payload.to);
+      const mine = q.payload.to === e.actor || (to.kind === 'client' && actor.kind === 'client');
+      if (!mine) return `only ${to.name} can answer this`;
+      if (!e.payload?.text) return 'an answer needs text';
+      return null;
+    }
+    case 'assign': {
+      if (!CAN.assign.has(role)) return `${role} cannot assign work`;
+      const to = state.actors.get(e.payload?.to);
+      if (!to || to.kind !== 'staff' || !CAN.prepare.has(to.role)) return 'assign to a preparer, reviewer or partner';
+      if (to.active_from && e.at.slice(0, 10) < to.active_from) return `${to.name} is not active until ${to.active_from}`;
+      if (!e.target) return 'say what is being assigned';
+      return null;
+    }
+    case 'log_time':
+      if (actor.kind !== 'staff') return 'only staff log time';
+      if (!(e.payload?.area in state.base.budget)) return `area must be one of: ${Object.keys(state.base.budget).join(', ')}`;
+      if (!(e.payload.hours > 0 && e.payload.hours <= 24)) return 'hours must be between 0 and 24';
+      return null;
+    case 'set_standard':
+      if (!CAN.admin.has(role)) return 'only the firm administrator changes firm standards';
+      if (!STANDARD_KEYS.includes(e.target)) return `standard must be one of: ${STANDARD_KEYS.join(', ')}`;
+      if (!(typeof e.payload?.value === 'number' && e.payload.value > 0)) return 'a standard needs a positive number';
+      if (!e.payload.reason) return 'say why the standard changes';
+      return null;
+    case 'notice_response':
+      if (!CAN.prepare.has(role)) return `${role} cannot answer notices`;
+      if (!state.filed) return 'only a filed return has notices to answer';
+      if (!state.base.packet.raw.tax_agency_records.notices.some((n) => n.id === e.target)) return `no notice ${e.target}`;
+      if (!e.payload?.text) return 'a response needs text';
+      return null;
+    case 'roll_forward':
+      if (!CAN.prepare.has(role)) return `${role} cannot roll the file forward`;
+      if (!state.filed) return 'roll forward after filing';
+      if (state.rolledForward) return 'already rolled forward';
+      return null;
     default:
       return `unknown event kind ${e.kind}`;
   }
@@ -277,8 +472,51 @@ function apply(state, e) {
     case 'view_sensitive':
       state.viewLog.push(e);
       break;
-    case 'file':
-      state.filed = { ...e, hash: returnHash(state), return: computeReturn(state) };
+    case 'file': {
+      const filing = { ...e, type: state.amendment ? 'amended' : 'original', amendment: state.amendment, hash: returnHash(state), return: computeReturn(state), acks: [] };
+      state.filings.push(filing);
+      state.filed = filing;
+      state.amendment = null;
+      break;
+    }
+    case 'extend':
+      state.extensions.push(e);
+      break;
+    case 'efile_ack': {
+      const filing = state.filed;
+      filing.acks.push(e);
+      if (e.payload.status === 'rejected') {
+        // A rejected submission was never filed: unfreeze so it can be fixed and sent again.
+        filing.rejected = e;
+        state.amendment = filing.amendment;
+        state.filed = [...state.filings].reverse().find((f) => !f.rejected) ?? null;
+      }
+      break;
+    }
+    case 'amend':
+      state.amendment = e;
+      break;
+    case 'ask':
+      state.questions.set(e.id, { ...e, answer: null });
+      break;
+    case 'answer':
+      state.questions.get(e.target).answer = e;
+      break;
+    case 'assign':
+      state.assignments.set(e.target, e);
+      break;
+    case 'log_time':
+      state.time.push(e);
+      break;
+    case 'set_standard':
+      state.standards[e.target] = e.payload.value;
+      if (e.target === 'partner_threshold') threshold = e.payload.value;
+      break;
+    case 'notice_response':
+      state.noticeResponses.push({ ...e, filedHash: state.filed.hash });
+      break;
+    case 'roll_forward':
+      state.rolledForward = e;
       break;
     default:
       break;
@@ -321,9 +559,12 @@ export function makeBase(packet, matched, checks) {
     versionId: checks.version,
     version: v,
     lines: new Map(packet.lines.filter((l) => l.version === checks.version).map((l) => [l.key, l])),
+    get graph() { const g = lineGraph(this.lines); Object.defineProperty(this, 'graph', { value: g }); return g; },
     requiredSteps: standards.required_steps,
     verificationTypes: standards.verification_types,
     partnerThreshold: Number(standards.rules.map((r) => r.match(/tax effect over ([\d,]+)/i)?.[1]).find(Boolean)?.replace(/,/g, '') ?? 1000),
+    variance: standards.variance_review,
+    budget: packet.raw.firm.budget_hours,
   };
 }
 
@@ -332,11 +573,14 @@ export function reduce(base, events) {
   const ordered = [...events].sort((a, b) => a.seq - b.seq);
   const { reverted, rejected: revertRejected } = revertedSet(ordered, actors);
 
+  threshold = base.partnerThreshold;
   const state = {
     base, actors,
     items: new Map(base.checks.results.map((r) => [r.id, { result: r, closing: null, signoffs: [] }])),
     notes: new Map(), steps: new Map(), verifications: new Map(),
     returnSignoffs: [], approvals: [], filed: null, viewLog: [],
+    filings: [], extensions: [], amendment: null, questions: new Map(), assignments: new Map(), time: [], noticeResponses: [], rolledForward: null,
+    standards: { partner_threshold: base.partnerThreshold, variance_percent: base.variance?.flag_if_change_over_percent ?? 10, variance_amount: base.variance?.and_over_amount ?? 1000 },
   };
   const log = [];
   for (const e of ordered) {
@@ -350,7 +594,8 @@ export function reduce(base, events) {
   }
 
   const items = [...state.items.values()].map((i) => ({
-    ...i.result, status: itemStatus(i), closing: i.closing, signoffs: i.signoffs, requiredSignoffs: requiredLevels(i),
+    ...i.result, requires: { ...i.result.requires, signoff: requiredLevels(i).includes('partner') ? 'partner' : 'reviewer' },
+    status: itemStatus(i), closing: i.closing, signoffs: i.signoffs, requiredSignoffs: requiredLevels(i), assignment: state.assignments.get(i.result.id) ?? null,
     stale: i.signoffs.filter((s) => s.hash !== itemHash(i)).map((s) => s.id),
   }));
   const ret = computeReturn(state);
@@ -365,6 +610,15 @@ export function reduce(base, events) {
     returnSignoffs: state.returnSignoffs.map((s) => ({ ...s, valid: s.hash === returnHash(state) })),
     approvals: state.approvals.map((a) => ({ ...a, valid: a.hash === returnHash(state) })),
     filed: state.filed,
+    filings: state.filings,
+    extensions: state.extensions,
+    amendment: state.amendment,
+    questions: [...state.questions.values()],
+    assignments: Object.fromEntries(state.assignments),
+    time: state.time,
+    standards: state.standards,
+    noticeResponses: state.noticeResponses,
+    rolledForward: state.rolledForward,
     viewLog: state.viewLog,
     blockers: b,
     canFile: b.length === 0,

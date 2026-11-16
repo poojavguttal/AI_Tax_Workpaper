@@ -67,7 +67,7 @@ function Section({ title, aside, children }) {
   );
 }
 
-export function LineTrace({ lineKey, onOpenRef }) {
+export function LineTrace({ lineKey, onOpenRef, readOnly = false }) {
   const { state, dispatch } = useWorkpaper();
   const types = packet.raw.firm.starter_standards.verification_types;
   const [vtype, setVtype] = useState(types[0]);
@@ -94,6 +94,7 @@ export function LineTrace({ lineKey, onOpenRef }) {
         ]} />
       </div>
       {l.note && <div className="callout mt16 c2">{l.note}</div>}
+      {eff?.own ? <div className="callout mt16 c2">Includes {lineValue(eff.own, l.key)} recorded on this line itself{l.inputs.length ? '; the rest flows in from the lines it is built from' : ''}.</div> : null}
       <FindingRows ids={resultsByLine.get(lineKey)} />
 
       {l.inputs.length > 0 && (
@@ -103,11 +104,12 @@ export function LineTrace({ lineKey, onOpenRef }) {
               <tbody>
                 {l.inputs.map((k) => {
                   const i = lineOf(k);
+                  const ie = state.return.lines.find((x) => x.key === k);
                   return (
                     <tr key={k} className="click" onClick={() => onOpenRef(k)}>
                       <td style={{ width: 120 }}><span className="mono c2">{k}</span></td>
                       <td className="ellipsis" style={{ maxWidth: 1 }}>{i?.label}</td>
-                      <td className="r num w5">{lineValue(i?.value, k)}</td>
+                      <td className="r num w5">{ie ? <><span className="strike t12" style={{ marginRight: 6 }}>{lineValue(i?.value, k)}</span><span className="green">{lineValue(ie.effective, k)}</span></> : lineValue(i?.value, k)}</td>
                     </tr>
                   );
                 })}
@@ -181,14 +183,62 @@ export function LineTrace({ lineKey, onOpenRef }) {
         {verified.map((v) => (
           <div key={v.id} className="row mb8"><ShieldCheck size={15} className="green" /><Person id={v.actor} /><span className="c3">{v.payload.type.replace(/_/g, ' ')} · {fmtDate(v.at)}</span></div>
         ))}
-        <div className="row">
+        {readOnly && verified.length === 0 && <div className="c3">Not separately verified.</div>}
+        {!readOnly && <div className="row">
           <select className="select" style={{ width: 260 }} value={vtype} onChange={(e) => setVtype(e.target.value)}>
             {types.map((t) => <option key={t} value={t}>{t.replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())}</option>)}
           </select>
           <button type="button" className="btn" onClick={() => dispatch({ kind: 'verify', target: `line:${lineKey}`, payload: { type: vtype, evidence: l.sources } }, { label: `${lineKey} verified` })}>Record verification</button>
-        </div>
+        </div>}
       </Section>
+      {!readOnly && typeof l.value === 'number' && <WhatIf l={l} current={eff?.effective ?? l.value} />}
     </div>
+  );
+}
+
+// A line's tax-effect rate category, from its form (the engine can't be rerun).
+function rateFor(l) {
+  if (l.form === 'SchC' || l.form === 'SchSE') return 'schc_profit';
+  if (l.form === 'F8949' || l.form === 'SchD') return /^(A|B|H)\.|1b|short/i.test(l.line + l.label) ? 'stcg' : 'ltcg';
+  if (l.form === 'SchB') return 'interest';
+  if (l.form === 'SchA') return /tax/i.test(l.label) ? 'salt' : 'itemized';
+  if (l.form === 'Sch1' && /deduction|contribution|adjust|insurance/i.test(l.label)) return 'adjustment';
+  if (l.form === 'F1040' && /^1/.test(l.line)) return 'wages';
+  if (l.jurisdiction === 'california') return 'ca_source_income';
+  return 'ordinary_income';
+}
+
+function WhatIf({ l, current }) {
+  const { dispatch } = useWorkpaper();
+  const rates = packet.index.versions.get(VERSION).tax_effect_rates;
+  const [value, setValue] = useState('');
+  const [cat, setCat] = useState(rateFor(l));
+  const [reason, setReason] = useState('');
+  const v = Number(String(value).replace(/[,$]/g, ''));
+  const delta = value === '' || Number.isNaN(v) ? 0 : v - current;
+  const r = rates[cat];
+  const fed = Math.round(delta * r.federal_per_dollar);
+  const ca = Math.round(delta * r.california_per_dollar);
+  return (
+    <Section title="What if" aside={<span className="t12 c3">Estimate only: change × the engine's per-dollar rate</span>}>
+      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+        <input className="input" style={{ width: 160 }} placeholder={String(current)} value={value} onChange={(e) => setValue(e.target.value)} />
+        <select className="select" style={{ width: 200 }} value={cat} onChange={(e) => setCat(e.target.value)}>{Object.keys(rates).map((k) => <option key={k} value={k}>{k.replace(/_/g, ' ')}</option>)}</select>
+      </div>
+      {delta !== 0 && (
+        <div className="whatif mt12">
+          <div><span className="cap">Change</span><b>{delta > 0 ? '+' : '−'}{Math.abs(delta).toLocaleString('en-US')}</b></div>
+          <div><span className="cap">Federal tax</span><b className={fed > 0 ? 'red' : fed < 0 ? 'green' : ''}>{fed > 0 ? '+' : fed < 0 ? '−' : ''}${Math.abs(fed).toLocaleString('en-US')}</b></div>
+          <div><span className="cap">California tax</span><b className={ca > 0 ? 'red' : ca < 0 ? 'green' : ''}>{ca > 0 ? '+' : ca < 0 ? '−' : ''}${Math.abs(ca).toLocaleString('en-US')}</b></div>
+        </div>
+      )}
+      {delta !== 0 && (
+        <div className="row mt12" style={{ gap: 8 }}>
+          <input className="input grow" placeholder="Reason, to keep this as an adjustment" value={reason} onChange={(e) => setReason(e.target.value)} />
+          <button type="button" className="btn" disabled={!reason} onClick={() => { dispatch({ kind: 'adjust', target: `line:${l.key}`, payload: { value: v, reason, effect: { federal: fed, california: ca }, rate: cat, evidence: [] } }, { label: `Adjustment to ${l.key} recorded for sign-off` }); setValue(''); setReason(''); }}>Keep as adjustment</button>
+        </div>
+      )}
+    </Section>
   );
 }
 

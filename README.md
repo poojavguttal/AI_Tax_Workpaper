@@ -63,7 +63,7 @@ One insert-only `events` table and one pure function: `reduce(makeBase(packet, m
 
 - **Closing items.** Errors close by `correct`, conflicts and judgments by `decide` (choose an alternative and give the rationale; judgments also need the authority), completeness by `dispose` or `explain`, and outside filings by `acknowledge`. A reviewer or partner may `dismiss` a finding with a reason.
 - **Sign-off.** Each item needs the reviewer, plus the partner when its effect is over 1,000. Nobody may sign off their own work. A sign-off stores a content hash, so any later change marks the item `reopened`. Return sign-offs and the client's approval hash the whole effective return.
-- **Effective return.** Engine totals plus each accepted item's estimated effect (`tax_effect_rates` or `what_if`); the engine is not rerun. Line values change where a correction or decision states them. Accepting every recommendation gives a federal refund of 4,264 and a California refund of 11,692, the figures on the findings tab.
+- **Effective return.** Engine values plus recorded changes, without rerunning the engine. Every change becomes a per-line delta that flows up through each line that is a true sum or carry of its inputs (signs inferred from the engine's own values; forms whose arithmetic embeds floors, limits or phase-outs, such as AMT, credits, QBI, SE tax, passive losses and basis, never pass changes on). The engine's what-if values are applied line for line as deltas, so they add to other changes. Each item's estimated tax effect (`tax_effect_rates` or `what_if`) is booked on the tax lines (1040 line 16, 540NR line 37) and payment effects on the payment lines, so lines 24, 33 and 37 and 540NR 64, 78 and 97 always equal the headline totals and every sum line still adds up (tested). Accepting every recommendation gives a federal refund of 4,264 and a California refund of 11,692, the figures on the findings tab.
 - **Undo.** A `revert` of an event or a whole batch; a revert of a revert restores it. Only the author, a reviewer or a partner may undo.
 - **Filing gate.** Blockers are open blocking items, open blocking notes, unfinished required steps (seven of the twelve derive from item status and sign-offs), and missing or stale sign-offs and approval. A `file` event freezes the return; later content changes are rejected.
 - **Roles** come from `firm.staff`, including `active_from`, and are never taken from the event.
@@ -78,3 +78,21 @@ SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… npm run seed
 ```
 
 Apply `db/migrations/0001_packet.sql` to the Supabase project before seeding. Packet tables are read-only after load (RLS select-only, triggers block update and delete).
+
+## Step 5: schedules, season, people, filing and firm (done)
+
+New event kinds, all validated by the reducer and covered by tests (132 passing):
+
+| Event | Who | Rule |
+| --- | --- | --- |
+| `extend` | reviewer, partner | once per jurisdiction, before filing; records the payment sent |
+| `efile_ack` | reviewer, partner | accepted or rejected per jurisdiction; a rejection unfreezes the return so it can be fixed and resent |
+| `amend` | reviewer, partner | only after an accepted filing; reopens changes on top of the filed version, which stays as filed; needs fresh sign-offs, approval and a new `file` |
+| `ask` / `answer` | staff and clients | a question goes to one person; only they (or either client) answer; the answer is kept as evidence; optional blocking |
+| `assign` | reviewer, partner, firm admin | to an active preparer, reviewer or partner, with a due date |
+| `log_time` | staff | against the firm's budget areas |
+| `set_standard` | firm admin | partner threshold and variance limits; the required sign-off level is derived from the current threshold |
+| `notice_response` | preparer, reviewer, partner | only after filing; tied to the filed return's content hash |
+| `roll_forward` | preparer, reviewer, partner | opens 2026 from the filed return |
+
+Screens: Schedules (depreciation by asset, sales detail, state split, books to tax, rentals and passive, K-1 lines, carryovers, basis by year, prior preparer vs us, each tied to the return), Versions (v1/v2/v3 compare, findings raised and cleared, season replay), Filing (extension, transmit, e-file answers, amendment as 1040-X columns, notices, client's copy), Next year (2026 estimates, opening balances, recurring decisions), Inbox (questions, assignments, deadlines), Client portal, Examiner view (read-only, as filed), Firm (status and search, staff, standards, time against budget). Every return line has a what-if that can be kept as an adjustment. Tabs of one browser update live (storage events) and show who else is viewing (BroadcastChannel presence); with Supabase the same comes from Realtime.

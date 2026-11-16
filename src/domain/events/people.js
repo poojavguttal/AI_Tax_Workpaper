@@ -14,4 +14,9 @@ export const CAN = {
   oversee: new Set(['reviewer', 'partner']),                   // revert others' events, resolve others' notes
   file: new Set(['reviewer', 'partner']),
   approve: new Set(['client']),
+  assign: new Set(['reviewer', 'partner', 'firm_administrator']),
+  admin: new Set(['firm_administrator']),
 };
+
+/** Firm standards the administrator may change, with their starting values. */
+export const STANDARD_KEYS = ['partner_threshold', 'variance_percent', 'variance_amount'];

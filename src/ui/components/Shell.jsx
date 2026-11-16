@@ -1,22 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
-import { LayoutGrid, ListChecks, Table2, FileText, History, ChevronsUpDown, Check, RotateCcw, Lock } from 'lucide-react';
+import { LayoutGrid, ListChecks, Table2, FileText, History, BookOpenCheck, GitCompare, Send, CalendarRange, Inbox, UserRound, Eye, Building2, ChevronsUpDown, Check, RotateCcw, Lock } from 'lucide-react';
 import { useWorkpaper } from '../state/Workpaper.jsx';
 import { actorsList, packet } from '../state/base.js';
 import { ROLE_LABEL } from '../format.js';
 import { Avatar, Household } from './ui.jsx';
+import { NotificationBell, PresenceDots } from './People.jsx';
 import { href } from '../state/router.js';
 
 export function Sidebar({ path }) {
-  const { state } = useWorkpaper();
+  const { state, actor } = useWorkpaper();
   const findings = state.items.filter((i) => ['error', 'conflict', 'judgment', 'adjustment'].includes(i.kind) && i.status !== 'closed').length;
-  const nav = [
-    ['overview', 'Overview', LayoutGrid],
-    ['queue', 'Review', ListChecks, findings],
-    ['return', 'Return', Table2],
-    ['documents', 'Documents', FileText, packet.documents.length],
-    ['history', 'Activity', History],
+  const waiting = state.questions.filter((q) => !q.answer).length;
+  const groups = actor?.kind === 'client' ? [['Your return', [['client', 'Your 2025 return', UserRound]]]] : [
+    ['Workpaper', [
+      ['overview', 'Overview', LayoutGrid],
+      ['queue', 'Review', ListChecks, findings],
+      ['return', 'Return', Table2],
+      ['schedules', 'Schedules', BookOpenCheck],
+      ['documents', 'Documents', FileText, packet.documents.length],
+    ]],
+    ['Season', [
+      ['versions', 'Versions', GitCompare],
+      ['filing', 'Filing', Send, state.filed ? undefined : undefined],
+      ['nextyear', 'Next year', CalendarRange],
+    ]],
+    ['People', [
+      ['inbox', 'Inbox', Inbox, waiting || undefined],
+      ['history', 'Activity', History],
+    ]],
+    ['Views', [
+      ['client', 'Client portal', UserRound],
+      ['examiner', 'Examiner view', Eye],
+      ['firm', 'Firm', Building2],
+    ]],
   ];
-  const active = { finding: 'queue', document: 'documents' }[path] ?? path;
+  const active = { finding: 'queue', document: 'documents', notice: 'filing', copy: 'filing' }[path] ?? path;
   return (
     <aside className="sidebar">
       <div className="logo"><span className="wordmark">mira<b>flores.</b></span></div>
@@ -29,11 +47,15 @@ export function Sidebar({ path }) {
         <ChevronsUpDown size={14} className="c4" />
       </div>
       <div className="navlist">
-        <div className="navgroup cap">Workpaper</div>
-        {nav.map(([p, label, Icon, n]) => (
-          <a key={p} href={href(p)} className={`nav ${active === p ? 'on' : ''}`}>
-            <Icon size={18} strokeWidth={1.9} />{label}{n !== undefined && <span className="n">{n}</span>}
-          </a>
+        {groups.map(([g, nav]) => (
+          <div key={g} className="navsec">
+            <div className="navgroup cap">{g}</div>
+            {nav.map(([p, label, Icon, n]) => (
+              <a key={p} href={href(p)} className={`nav ${active === p ? 'on' : ''}`}>
+                <Icon size={18} strokeWidth={1.9} />{label}{n !== undefined && <span className="n">{n}</span>}
+              </a>
+            ))}
+          </div>
         ))}
       </div>
       <Me />
@@ -95,6 +117,8 @@ export function Header({ children, right }) {
     <header className="header">
       <div className="grow">{children}</div>
       {right}
+      <PresenceDots />
+      <NotificationBell />
       <span className="pill outline" title={`Computed ${packet.index.versions.get('v3').computed_at}`}>Engine v3</span>
     </header>
   );

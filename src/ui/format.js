@@ -59,6 +59,8 @@ export const ACTION_WORDS = {
   explain: 'Explained variance', acknowledge: 'Acknowledged', adjust: 'Adjusted line', verify: 'Verified', signoff: 'Signed off',
   note: 'Added note', resolve_note: 'Resolved note', complete_step: 'Completed step', client_approval: 'Approved return',
   file: 'Filed return', revert: 'Undid', view_sensitive: 'Viewed unmasked data',
+  extend: 'Filed extension', efile_ack: 'Recorded e-file result', amend: 'Opened amendment', ask: 'Asked a question', answer: 'Answered',
+  assign: 'Assigned', log_time: 'Logged time', set_standard: 'Changed firm standard', notice_response: 'Answered notice', roll_forward: 'Rolled forward to 2026',
 };
 
 export const maskSsn = (v) => String(v).replace(/^\d{3}-\d{2}/, '•••-••');

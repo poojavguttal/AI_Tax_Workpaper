@@ -36,7 +36,7 @@ export function WorkpaperProvider({ children }) {
 
   const state = useMemo(() => reduce(base, events), [events]);
   const actor = actorById.get(actorId);
-  const presence = usePresence(actorId);
+  const presence = usePresence(actorId, store);
 
   const toast = useCallback((t) => {
     const id = Math.random().toString(36).slice(2);
@@ -52,15 +52,22 @@ export function WorkpaperProvider({ children }) {
     const prev = eventsRef.current;
     const next = append(prev, ...list.map((d) => ({ actor: actorId, at: now, batch, ...d })));
     const added = next.slice(prev.length);
-    const saved = await store.append(next, added);
+    let saved;
+    try { saved = await store.append(next, added); } catch (err) {
+      toast({ kind: 'warn', text: `Not saved: ${err.message ?? err}`, ms: 8000 });
+      return { rejected: [], added: [] };
+    }
     setEvents(saved);
+    // A shared log assigns its own ids; find ours by what we sent.
+    const stored = saved.filter((e) => e.actor === actorId && new Date(e.at).getTime() === new Date(now).getTime()).slice(-list.length);
+    const firstId = (stored[0] ?? added[0]).id;
     const reduced = reduce(base, saved);
     const verdicts = reduced.log.slice(-list.length); // the log is in seq order; ours are the newest
     const rejected = verdicts.filter((v) => v.status === 'rejected');
     if (rejected.length) {
       toast({ kind: 'warn', text: rejected.length === list.length ? rejected[0].reason : `${list.length - rejected.length} applied, ${rejected.length} not allowed: ${rejected[0].reason}`, ms: 8000 });
     } else if (label) {
-      const undo = undoable ? () => dispatch(batch ? { kind: 'revert', payload: { batch } } : { kind: 'revert', target: added[0].id }, { label: 'Undone', undoable: false }) : null;
+      const undo = undoable ? () => dispatch(batch ? { kind: 'revert', payload: { batch } } : { kind: 'revert', target: firstId }, { label: 'Undone', undoable: false }) : null;
       toast({ kind: 'ok', text: label, action: undo && { label: 'Undo', run: undo } });
     }
     return { rejected, added };
@@ -95,12 +102,21 @@ export const useWorkpaper = () => useContext(Ctx);
 // browser talk over a BroadcastChannel (Supabase Realtime presence plays the same
 // role for a shared log). Presence is not part of the record, so it is never an event.
 const TAB = Math.random().toString(36).slice(2);
-function usePresence(actorId) {
+function usePresence(actorId, store) {
   const { path, params } = useRoute();
   const where = `${path}${params.id ? `:${params.id}` : params.line ? `:${params.line}` : ''}`;
   const [peers, setPeers] = useState({});
   useEffect(() => {
-    if (typeof BroadcastChannel === 'undefined') return undefined;
+    if (store?.kind !== 'supabase') return undefined;
+    const ch = store.db.channel(`presence:${store.packetId}`, { config: { presence: { key: TAB } } });
+    ch.on('presence', { event: 'sync' }, () => {
+      const all = Object.entries(ch.presenceState()).filter(([tab]) => tab !== TAB).map(([, metas]) => metas[metas.length - 1]);
+      setPeers(Object.fromEntries(all.map((p) => [p.tab, p])));
+    }).subscribe((status) => { if (status === 'SUBSCRIBED') ch.track({ tab: TAB, actorId, path, where, at: Date.now() }); });
+    return () => { store.db.removeChannel(ch); };
+  }, [store, actorId, path, where]);
+  useEffect(() => {
+    if (store?.kind === 'supabase' || typeof BroadcastChannel === 'undefined') return undefined;
     const ch = new BroadcastChannel('miraflores.presence');
     const me = () => ({ tab: TAB, actorId, path, where, at: Date.now() });
     const beat = () => ch.postMessage(me());
@@ -115,6 +131,6 @@ function usePresence(actorId) {
     const bye = () => ch.postMessage({ tab: TAB, bye: true });
     window.addEventListener('beforeunload', bye);
     return () => { bye(); clearInterval(timer); window.removeEventListener('beforeunload', bye); ch.close(); };
-  }, [actorId, path, where]);
+  }, [store, actorId, path, where]);
   return Object.values(peers);
 }

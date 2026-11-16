@@ -81,7 +81,7 @@ Apply `db/migrations/0001_packet.sql` to the Supabase project before seeding. Pa
 
 ## Step 5: schedules, season, people, filing and firm (done)
 
-New event kinds, all validated by the reducer and covered by tests (132 passing):
+New event kinds, all validated by the reducer and covered by tests (133 passing):
 
 | Event | Who | Rule |
 | --- | --- | --- |
@@ -96,3 +96,15 @@ New event kinds, all validated by the reducer and covered by tests (132 passing)
 | `roll_forward` | preparer, reviewer, partner | opens 2026 from the filed return |
 
 Screens: Schedules (depreciation by asset, sales detail, state split, books to tax, rentals and passive, K-1 lines, carryovers, basis by year, prior preparer vs us, each tied to the return), Versions (v1/v2/v3 compare, findings raised and cleared, season replay), Filing (extension, transmit, e-file answers, amendment as 1040-X columns, notices, client's copy), Next year (2026 estimates, opening balances, recurring decisions), Inbox (questions, assignments, deadlines), Client portal, Examiner view (read-only, as filed), Firm (status and search, staff, standards, time against budget). Every return line has a what-if that can be kept as an adjustment. Tabs of one browser update live (storage events) and show who else is viewing (BroadcastChannel presence); with Supabase the same comes from Realtime.
+
+## Hosting
+
+Vercel builds the site with `npm run build` and serves `dist`; routes are hash-based, so no rewrites are needed. Without Supabase settings each visitor's events are kept in their own browser.
+
+For one shared, live log:
+
+1. Create a Supabase project. In the SQL editor run `db/migrations/0001` to `0005` in order. `0005_demo_access.sql` adds this step's event kinds, lets the anon key read and append events for a seeded packet (the app has no sign-in; the person switcher chooses who acts, and the reducer still rejects what that role may not do), and turns on Realtime for `events`.
+2. Load the packet: `SUPABASE_URL=… SUPABASE_SERVICE_ROLE_KEY=… npm run seed`.
+3. In Vercel, add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` (Settings → Environment Variables) and redeploy.
+
+The account menu then shows "Shared log · Supabase": every open workpaper hears new events, and presence comes from Realtime instead of the browser channel. The log is append-only, so the reset option is hidden; undo is a `revert` event as before.

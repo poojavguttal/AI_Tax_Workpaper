@@ -17,13 +17,13 @@ alter table events add constraint events_kind_check check (kind in (
 -- Actors are the packet's people (firm.staff, firm.client_users), never free text.
 alter table events add constraint events_actor_shape check (actor ~ '^(st|cu)-[0-9]{2}$');
 
-create policy events_demo_read on events for select to anon
-  using (exists (select 1 from packet_raw p where p.id = events.packet_id));
+-- The packet_id foreign key already limits rows to seeded packets. (A lookup in
+-- packet_raw here would run under anon's own row security and see nothing.)
+create policy events_demo_read on events for select to anon using (true);
 
 -- 'file' is allowed here because there is no filing-gate function in the demo;
 -- the reducer refuses a filing while any blocker is open.
-create policy events_demo_insert on events for insert to anon
-  with check (exists (select 1 from packet_raw p where p.id = events.packet_id));
+create policy events_demo_insert on events for insert to anon with check (true);
 
 -- Live updates: every open workpaper hears new events.
 alter publication supabase_realtime add table events;
